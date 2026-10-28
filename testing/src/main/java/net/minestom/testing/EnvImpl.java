@@ -18,6 +18,7 @@ final class EnvImpl implements Env {
     private final ServerProcess process;
     private final List<FlexibleListenerImpl<?>> listeners = new CopyOnWriteArrayList<>();
 
+    @SuppressWarnings("deprecation") // legacy dead dispatcher start, kept until harness moves off it
     public EnvImpl(ServerProcess process) {
         this.process = process;
         // If exceptions reach the exception handler, by default fail the test.

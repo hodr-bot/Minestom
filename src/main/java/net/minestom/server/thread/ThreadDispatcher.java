@@ -21,7 +21,11 @@ import java.util.function.IntFunction;
  *
  * @see Acquirable
  * @see AcquirableSource
+ * <p>
+ * No longer used: each instance ticks on its own thread, see
+ * {@link net.minestom.server.instance.InstanceThread}.
  */
+@Deprecated(since = "instance-threads", forRemoval = false)
 public sealed interface ThreadDispatcher<P, E extends Tickable> permits ThreadDispatcherImpl {
     /**
      * Creates a new ThreadDispatcher using default thread names (ex. Ms-Tick-n).

@@ -1,25 +1,46 @@
 package net.minestom.server.thread;
 
-import net.minestom.server.property.ServerProperties;
+import net.minestom.server.entity.Entity;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.UnknownNullability;
 
-import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
-final class AcquirableImpl<T> implements Acquirable<T> {
-    private static final boolean ASSERTIONS_ENABLED = AcquirableImpl.class.desiredAssertionStatus();
+/**
+ * No-op implementation: there is a single owner thread per instance and all
+ * gameplay access is confined to it, so acquisition never blocks.
+ */
+@ApiStatus.Internal
+@SuppressWarnings("deprecation") // legacy internals, kept for API compatibility
+public final class AcquirableImpl<T> implements Acquirable<T> {
     static final AtomicLong WAIT_COUNTER_NANO = new AtomicLong();
 
-    /**
-     * Global lock used for synchronization.
-     */
-    static final ReentrantLock GLOBAL_LOCK = new ReentrantLock();
+    // Entities currently ticked by this thread, set by the instance tick.
+    private static final ThreadLocal<Set<?>> LOCAL_TICKED = new ThreadLocal<>();
+
+    @ApiStatus.Internal
+    public static void beginLocalTick(Set<?> entities) {
+        LOCAL_TICKED.set(entities);
+    }
+
+    @ApiStatus.Internal
+    public static void endLocalTick() {
+        LOCAL_TICKED.remove();
+    }
+
+    static Stream<Entity> localTickedEntities() {
+        final Set<?> ticked = LOCAL_TICKED.get();
+        if (ticked == null) return Stream.empty();
+        return ticked.stream()
+                .filter(Entity.class::isInstance)
+                .map(Entity.class::cast);
+    }
 
     private final T value;
-    private final Thread initThread = Thread.currentThread();
     private volatile @Nullable TickThread assignedThread;
 
     public AcquirableImpl(T value) {
@@ -28,65 +49,28 @@ final class AcquirableImpl<T> implements Acquirable<T> {
 
     @Override
     public Acquired<T> lock() {
-        final TickThread assignedThread = this.assignedThread;
-        if (assignedThread == null) {
-            assertInitThread();
-            return new AcquiredImpl<>(unwrap(), null);
-        }
-        ReentrantLock lock = enter(assignedThread);
-        assert assignedThread.lock().isHeldByCurrentThread();
-        return new AcquiredImpl<>(unwrap(), lock);
+        return new AcquiredImpl<>(unwrap(), null);
     }
 
     @Override
     public boolean isLocal() {
-        final TickThread assignedThread = this.assignedThread;
-        return Thread.currentThread() == Objects.requireNonNullElse(assignedThread, initThread);
+        return true;
     }
 
     @Override
     public boolean isOwned() {
-        final TickThread assignedThread = this.assignedThread;
-        if (assignedThread == null) return Thread.currentThread() == initThread;
-        return AcquirableImpl.isOwnedImpl(assignedThread);
+        return true;
     }
 
     @Override
     public void sync(Consumer<T> consumer) {
-        final TickThread assignedThread = this.assignedThread;
-        if (assignedThread == null) {
-            assertInitThread();
-            consumer.accept(unwrap());
-            return;
-        }
-        ReentrantLock lock = enter(assignedThread);
-        try {
-            assert assignedThread.lock().isHeldByCurrentThread();
-            consumer.accept(unwrap());
-        } finally {
-            leave(lock);
-        }
+        consumer.accept(unwrap());
     }
 
     @Override
     public boolean trySync(Consumer<T> consumer) {
-        if (isOwned()) {
-            consumer.accept(unwrap());
-            return true;
-        }
-        TickThread assignedThread = this.assignedThread;
-        if (assignedThread != null) {
-            ReentrantLock lock = assignedThread.lock();
-            if (lock.tryLock()) {
-                try {
-                    consumer.accept(unwrap());
-                    return true;
-                } finally {
-                    lock.unlock();
-                }
-            }
-        }
-        return false;
+        consumer.accept(unwrap());
+        return true;
     }
 
     @Override
@@ -105,46 +89,10 @@ final class AcquirableImpl<T> implements Acquirable<T> {
 
     @Override
     public void assertOwnership() {
-        if (!ASSERTIONS_ENABLED && !ServerProperties.ACQUIRABLE_STRICT.get()) return;
-        if (isOwned()) return;
-        TickThread assignedThread = this.assignedThread;
-        Thread initThread = this.initThread;
-        if (assignedThread == null && Thread.currentThread() == initThread) return;
-        throw new AcquirableOwnershipException(initThread, assignedThread, unwrap().toString());
+        // Everything reachable is owned in the instance-thread model.
     }
 
-    void assertInitThread() {
-        if (Thread.currentThread() != initThread)
-            throw new IllegalStateException("Cannot lock an uninitialized Acquirable from a different thread");
-    }
-
-    static boolean isOwnedImpl(TickThread elementThread) {
-        if (Thread.currentThread() == elementThread) return true;
-        return elementThread.lock().isHeldByCurrentThread();
-    }
-
-    static @Nullable ReentrantLock enter(TickThread elementThread) {
-        if (isOwnedImpl(elementThread)) return null; // Nothing to lock, already owned by the current thread.
-        final long time = System.nanoTime();
-        // Enter the target thread
-        if (Thread.currentThread() instanceof TickThread tickThread && tickThread.lock().isHeldByCurrentThread()) {
-            while (!GLOBAL_LOCK.tryLock()) {
-                tickThread.lock().unlock();
-                tickThread.lock().lock();
-            }
-        } else {
-            GLOBAL_LOCK.lock();
-        }
-        final ReentrantLock targetLock = elementThread.lock();
-        targetLock.lock();
-        WAIT_COUNTER_NANO.addAndGet(System.nanoTime() - time);
-        return targetLock;
-    }
-
-    static void leave(@Nullable ReentrantLock lock) {
-        if (lock != null) {
-            lock.unlock();
-            GLOBAL_LOCK.unlock();
-        }
+    static void leave(@Nullable Object lock) {
+        // No locks are ever taken.
     }
 }

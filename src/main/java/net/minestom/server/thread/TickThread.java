@@ -18,8 +18,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * Thread responsible for ticking {@link Chunk chunks} and {@link Entity entities}.
  * <p>
  * Created in {@link ThreadDispatcher}, and awaken every tick with a task to execute.
+ * <p>
+ * No longer used: each instance ticks on its own {@link net.minestom.server.instance.InstanceThread}.
  */
 @ApiStatus.Internal
+@Deprecated(since = "instance-threads", forRemoval = false)
 public class TickThread extends MinestomThread {
     private final ReentrantLock lock = new ReentrantLock();
     private volatile boolean stop;

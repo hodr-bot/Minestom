@@ -19,5 +19,6 @@ public interface AcquirableSource<T> {
      *
      * @return an Acquirable which can be used to synchronize access to this object
      */
+    @SuppressWarnings("deprecation") // legacy no-op shim, kept for API compatibility
     Acquirable<? extends T> acquirable();
 }

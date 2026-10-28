@@ -133,6 +133,41 @@ public class SharedInstance extends Instance {
         return instanceContainer;
     }
 
+    @Override
+    public void execute(Runnable task) {
+        instanceContainer.execute(task);
+    }
+
+    @Override
+    public InstanceThread tickThread() {
+        return instanceContainer.tickThread();
+    }
+
+    @Override
+    public synchronized void startTickThread(long phaseOffsetNanos) {
+        // No own thread: ticked by the container thread.
+    }
+
+    @Override
+    public synchronized void stopTickThread() {
+        // No own thread: ticked by the container thread.
+    }
+
+    @Override
+    public boolean isTickThreadRunning() {
+        return instanceContainer.isTickThreadRunning();
+    }
+
+    @Override
+    public void setTickBudget(double msPerTick) {
+        instanceContainer.setTickBudget(msPerTick);
+    }
+
+    @Override
+    public double getTickBudget() {
+        return instanceContainer.getTickBudget();
+    }
+
     /**
      * Gets if two instances share the same chunks.
      *

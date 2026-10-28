@@ -15,6 +15,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.IntFunction;
 
+@SuppressWarnings("deprecation") // legacy internals, kept for API compatibility
 final class ThreadDispatcherImpl<P, E extends Tickable> implements ThreadDispatcher<P, E> {
     private final ThreadProvider<P> provider;
     private final List<TickThread> threads;

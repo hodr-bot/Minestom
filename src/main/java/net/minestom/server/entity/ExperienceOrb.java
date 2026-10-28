@@ -110,7 +110,7 @@ public class ExperienceOrb extends Entity {
     }
 
     @ApiStatus.Experimental
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "deprecation"}) // cast + legacy no-op shim
     @Override
     public Acquirable<? extends ExperienceOrb> acquirable() {
         return (Acquirable<? extends ExperienceOrb>) super.acquirable();

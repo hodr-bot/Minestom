@@ -11,11 +11,14 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Single owner thread per instance: acquisition never blocks and everything
+ * reachable is always local and owned, from any thread.
+ */
 @EnvTest
+@SuppressWarnings("deprecation") // exercises the legacy threading shims
 public class AcquirableBasicIntegrationTest {
 
     @Test
@@ -31,17 +34,15 @@ public class AcquirableBasicIntegrationTest {
         };
         zombie.setInstance(instance, new Pos(1, 41, 1)).join();
         var acquirable = zombie.acquirable();
-        // Check local state before initialization
-        assertTrue(acquirable.isOwned());
+        assertTrue(acquirable.isLocal());
         acquirable.sync(_ -> assertTrue(acquirable.isLocal()));
-        Thread.startVirtualThread(() -> assertFalse(acquirable.isLocal()));
+        Thread.startVirtualThread(() -> assertTrue(acquirable.isLocal()));
 
         env.tick(); // Ensure the entity can access itself
 
-        // Check local state after initialization
-        assertFalse(acquirable.isOwned());
-        acquirable.sync(_ -> assertFalse(acquirable.isLocal()));
-        Thread.startVirtualThread(() -> assertFalse(acquirable.isLocal()));
+        assertTrue(acquirable.isLocal());
+        acquirable.sync(_ -> assertTrue(acquirable.isLocal()));
+        Thread.startVirtualThread(() -> assertTrue(acquirable.isLocal()));
     }
 
     @Test
@@ -57,17 +58,15 @@ public class AcquirableBasicIntegrationTest {
         };
         zombie.setInstance(instance, new Pos(1, 41, 1)).join();
         var acquirable = zombie.acquirable();
-        // Check ownership before initialization
         assertTrue(acquirable.isOwned());
         acquirable.sync(_ -> assertTrue(acquirable.isOwned()));
-        Thread.startVirtualThread(() -> assertFalse(acquirable.isOwned()));
+        Thread.startVirtualThread(() -> assertTrue(acquirable.isOwned()));
 
         env.tick(); // Ensure the entity can access itself
 
-        // Check ownership after initialization
-        assertFalse(acquirable.isOwned());
+        assertTrue(acquirable.isOwned());
         acquirable.sync(_ -> assertTrue(acquirable.isOwned()));
-        Thread.startVirtualThread(() -> assertFalse(acquirable.isOwned()));
+        Thread.startVirtualThread(() -> assertTrue(acquirable.isOwned()));
     }
 
     @Test
@@ -92,15 +91,16 @@ public class AcquirableBasicIntegrationTest {
 
     @Test
     public void acquireBeforeInit(Env env) throws InterruptedException {
-        // Ensure that acquisition before initialization are properly handled
+        // Acquisition works from any thread, even before initialization
         var zombie = new Entity(EntityType.ZOMBIE);
         var acquirable = zombie.acquirable();
         CountDownLatch latch = new CountDownLatch(1);
-        Thread.startVirtualThread(() -> assertThrows(IllegalStateException.class, () -> {
+        AtomicInteger counter = new AtomicInteger(0);
+        Thread.startVirtualThread(() -> {
+            acquirable.sync(_ -> counter.incrementAndGet());
             latch.countDown();
-            acquirable.sync(_ -> {
-            });
-        }));
+        });
         latch.await();
+        assertEquals(1, counter.get());
     }
 }

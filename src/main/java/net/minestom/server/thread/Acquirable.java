@@ -11,6 +11,7 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 
 @ApiStatus.Experimental
+@Deprecated(since = "instance-threads", forRemoval = false)
 public sealed interface Acquirable<T> permits AcquirableImpl {
 
     /**
@@ -23,11 +24,15 @@ public sealed interface Acquirable<T> permits AcquirableImpl {
      * @return the entities ticked in the current thread
      */
     static Stream<Entity> localEntities() {
-        if (!(Thread.currentThread() instanceof TickThread tickThread)) return Stream.empty();
-        return tickThread.entries.stream()
-                .flatMap(partitionEntry -> partitionEntry.elements().stream())
-                .filter(tickable -> tickable instanceof Entity)
-                .map(tickable -> (Entity) tickable);
+        final Stream<Entity> owned = AcquirableImpl.localTickedEntities();
+        if (Thread.currentThread() instanceof TickThread tickThread) {
+            final Stream<Entity> dispatched = tickThread.entries.stream()
+                    .flatMap(partitionEntry -> partitionEntry.elements().stream())
+                    .filter(tickable -> tickable instanceof Entity)
+                    .map(tickable -> (Entity) tickable);
+            return Stream.concat(owned, dispatched);
+        }
+        return owned;
     }
 
     /**

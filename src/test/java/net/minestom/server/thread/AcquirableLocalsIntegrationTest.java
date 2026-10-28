@@ -13,6 +13,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @EnvTest
+@SuppressWarnings("deprecation") // exercises the legacy threading shims
 public class AcquirableLocalsIntegrationTest {
     @Test
     public void empty(Env env) {

@@ -363,8 +363,6 @@ public class InstanceContainer extends Instance {
         this.chunks.remove(CoordConversion.chunkIndex(chunkX, chunkZ));
         chunk.unload();
         chunkLoader.unloadChunk(chunk);
-        var dispatcher = MinecraftServer.process().dispatcher();
-        dispatcher.deletePartition(chunk);
     }
 
     @Override
@@ -792,6 +790,29 @@ public class InstanceContainer extends Instance {
         }
     }
 
+    @Override
+    protected void tickChunks(long time) {
+        for (Chunk chunk : getChunks()) {
+            try {
+                chunk.tick(time);
+            } catch (Throwable t) {
+                MinecraftServer.getExceptionManager().handleException(t);
+            }
+        }
+    }
+
+    @Override
+    public void tickOwned(long time) {
+        super.tickOwned(time);
+        for (SharedInstance shared : getSharedInstances()) {
+            try {
+                shared.tickOwned(time);
+            } catch (Throwable t) {
+                MinecraftServer.getExceptionManager().handleException(t);
+            }
+        }
+    }
+
     /**
      * Has this block already changed since last update?
      * Prevents StackOverflow with blocks trying to modify their position in onDestroy or onPlace.
@@ -846,7 +867,5 @@ public class InstanceContainer extends Instance {
 
     private void cacheChunk(Chunk chunk) {
         this.chunks.put(CoordConversion.chunkIndex(chunk.getChunkX(), chunk.getChunkZ()), chunk);
-        var dispatcher = MinecraftServer.process().dispatcher();
-        dispatcher.createPartition(chunk);
     }
 }

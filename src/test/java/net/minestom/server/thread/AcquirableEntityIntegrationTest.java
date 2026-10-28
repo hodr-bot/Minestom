@@ -8,9 +8,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CountDownLatch;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @EnvTest
+@SuppressWarnings("deprecation") // exercises the legacy threading shims
 public class AcquirableEntityIntegrationTest {
 
     @Test
@@ -18,9 +19,8 @@ public class AcquirableEntityIntegrationTest {
         var zombie = new Entity(EntityType.ZOMBIE);
         CountDownLatch latch = new CountDownLatch(1);
         Thread.startVirtualThread(() -> {
-            assertFalse(zombie.acquirable().isOwned());
-            assertFalse(zombie.acquirable().isLocal());
-            //assertThrows(AcquirableOwnershipException.class, () -> zombie.setInstance(instance, new Pos(1, 41, 1)).join());
+            assertTrue(zombie.acquirable().isOwned());
+            assertTrue(zombie.acquirable().isLocal());
             latch.countDown();
         });
         latch.await();

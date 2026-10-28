@@ -49,17 +49,19 @@ import net.minestom.server.snapshot.SnapshotUpdater;
 import net.minestom.server.snapshot.Snapshotable;
 import net.minestom.server.tag.TagHandler;
 import net.minestom.server.tag.Taggable;
-import net.minestom.server.thread.ThreadDispatcher;
+import net.minestom.server.thread.AcquirableImpl;
 import net.minestom.server.timer.Schedulable;
 import net.minestom.server.timer.Scheduler;
 import net.minestom.server.utils.ArrayUtils;
 import net.minestom.server.utils.PacketSendingUtils;
 import net.minestom.server.utils.chunk.ChunkCache;
 import net.minestom.server.utils.chunk.ChunkSupplier;
+import net.minestom.server.utils.collection.ConcurrentMessageQueues;
 import net.minestom.server.utils.validate.Check;
 import net.minestom.server.world.DimensionType;
 import net.minestom.server.world.biome.Biome;
 import net.minestom.server.world.clock.WorldClock;
+import org.jctools.queues.MessagePassingQueue;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.Nullable;
@@ -78,6 +80,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -89,8 +92,7 @@ import java.util.stream.Collectors;
  * chunk implementation has to be defined, see {@link InstanceContainer}.
  * <p>
  * WARNING: when making your own implementation registering the instance manually is required
- * with {@link InstanceManager#registerInstance(Instance)}, and
- * you need to be sure to signal the {@link ThreadDispatcher} of every partition/element changes.
+ * with {@link InstanceManager#registerInstance(Instance)}.
  */
 public abstract class Instance implements Block.Getter, Block.Setter, Biome.Getter, Biome.Setter,
         Tickable, Schedulable, Snapshotable, EventHandler<InstanceEvent>, Taggable, PacketGroupingAudience, Pointered, Identified {
@@ -143,6 +145,18 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
     // instance custom data
     protected TagHandler tagHandler = TagHandler.newHandler();
     private final Scheduler scheduler = Scheduler.newScheduler();
+
+    // Ownership: the thread ticking this instance, null before start (tests, pre-registration).
+    // All gameplay objects of this instance must only be touched by this thread.
+    private static final int MAX_MAILBOX_DRAIN = 1024;
+    private volatile @Nullable InstanceThread tickThread;
+    // Cross-thread mailbox, drained by the owner at the start of every tick.
+    private final MessagePassingQueue<Runnable> mailbox = ConcurrentMessageQueues.mpscUnboundedArrayQueue(64);
+    // CPU budget in milliseconds granted per tick slot; ticks are skipped while exhausted.
+    private volatile double tickBudgetMs = MinecraftServer.TICK_MS;
+    private double tickBudgetBalance;
+    private final AtomicLong tickCount = new AtomicLong();
+    private final AtomicLong skippedTicks = new AtomicLong();
     private final @Nullable EventNode<InstanceEvent> eventNode;
     private final Registries registries;
 
@@ -882,6 +896,243 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
         }
         // End of tick scheduled tasks
         this.scheduler.processTickEnd();
+    }
+
+    /**
+     * Runs one owned tick slot: mailbox, scheduler, chunks, entities.
+     * <p>
+     * Called either by the instance thread ({@link #tickSlot(long)}) with budget
+     * accounting, or directly when no tick thread is running (tests, tooling).
+     *
+     * @param time the tick time in milliseconds, which may only be used as a delta and has no meaning in real life
+     */
+    @ApiStatus.Internal
+    public void tickOwned(long time) {
+        final InstanceThread owner = tickThread();
+        if (owner != null && owner.isAlive() && Thread.currentThread() != owner) {
+            throw new IllegalStateException("Instance " + uuid + " is owned by " + owner.getName()
+                    + ", tickOwned called from " + Thread.currentThread().getName());
+        }
+        try {
+            tick(time);
+        } catch (Throwable t) {
+            MinecraftServer.getExceptionManager().handleException(t);
+        }
+        tickChunks(time);
+        tickEntities(time);
+    }
+
+    /**
+     * Ticks the chunks of this instance. No-op here, overridden by
+     * {@link InstanceContainer}; {@link SharedInstance} chunks are ticked by
+     * their container.
+     *
+     * @param time the tick time in milliseconds
+     */
+    protected void tickChunks(long time) {
+    }
+
+    /**
+     * Ticks the entities registered in this instance.
+     *
+     * @param time the tick time in milliseconds
+     */
+    protected void tickEntities(long time) {
+        final Set<Entity> entities = getEntities();
+        AcquirableImpl.beginLocalTick(entities);
+        try {
+            for (Entity entity : entities) {
+                // Between owners during a transfer: nobody ticks it, the join
+                // resumes it (the transfer costs at most one tick per side).
+                if (!entity.isTransferSettled()) continue;
+                try {
+                    entity.tick(time);
+                } catch (Throwable t) {
+                    MinecraftServer.getExceptionManager().handleException(t);
+                }
+            }
+        } finally {
+            AcquirableImpl.endLocalTick();
+        }
+    }
+
+    /**
+     * Runs one budgeted tick slot on the instance thread: always drains the
+     * mailbox, then ticks the gameplay only if the CPU budget allows it.
+     * Skipped ticks degrade the local TPS instead of lagging other instances.
+     *
+     * @param time the tick time in milliseconds
+     */
+    @ApiStatus.Internal
+    public void tickSlot(long time) {
+        drainMailbox();
+        tickBudgetBalance = Math.min(tickBudgetBalance + tickBudgetMs, 2 * tickBudgetMs);
+        if (tickBudgetBalance < MinecraftServer.TICK_MS) {
+            skippedTicks.incrementAndGet();
+            return;
+        }
+        final long start = System.nanoTime();
+        tickOwned(time);
+        tickBudgetBalance -= (System.nanoTime() - start) / 1e6;
+        tickCount.incrementAndGet();
+    }
+
+    /**
+     * Enqueues a task to run on the owner thread at the start of the next tick.
+     * Thread-safe, may be called from any thread.
+     * <p>
+     * If no tick thread is running (tests, tooling), the task runs inline on
+     * the caller thread.
+     *
+     * @param task the task to execute
+     */
+    public void execute(Runnable task) {
+        Objects.requireNonNull(task, "task");
+        if (isTickThreadRunning()) {
+            mailbox().relaxedOffer(task);
+        } else {
+            task.run();
+        }
+    }
+
+    /**
+     * Throws unless the current thread owns this instance (or no thread does yet).
+     */
+    @ApiStatus.Internal
+    public void checkOwner() {
+        final Thread owner = tickThread();
+        if (owner != null && owner.isAlive() && Thread.currentThread() != owner) {
+            throw new IllegalStateException("Cross-instance access: instance " + uuid
+                    + " is owned by " + owner.getName()
+                    + ", accessed from " + Thread.currentThread().getName());
+        }
+    }
+
+    /**
+     * Gets the thread owning this instance, null before start.
+     *
+     * @return the owner thread
+     */
+    @ApiStatus.Internal
+    public @Nullable InstanceThread tickThread() {
+        return tickThread;
+    }
+
+    /**
+     * Gets the mailbox drained by the owner at the start of every tick.
+     *
+     * @return the mailbox
+     */
+    @ApiStatus.Internal
+    protected MessagePassingQueue<Runnable> mailbox() {
+        return mailbox;
+    }
+
+    /**
+     * Starts the tick thread of this instance.
+     *
+     * @param phaseOffsetNanos the start offset staggering this instance against the others
+     */
+    @ApiStatus.Internal
+    public void startTickThread(long phaseOffsetNanos) {
+        final InstanceThread thread;
+        synchronized (this) {
+            if (tickThread != null) return;
+            thread = new InstanceThread(requireContainer(), phaseOffsetNanos);
+            this.tickThread = thread;
+        }
+        thread.start();
+    }
+
+    /**
+     * Stops the tick thread of this instance, waiting briefly for it to exit.
+     */
+    @ApiStatus.Internal
+    public void stopTickThread() {
+        final InstanceThread thread;
+        synchronized (this) {
+            thread = this.tickThread;
+            this.tickThread = null;
+        }
+        if (thread == null) return;
+        thread.shutdown();
+        try {
+            thread.join(10_000);
+        } catch (InterruptedException _) {
+            Thread.currentThread().interrupt();
+        }
+        // Run tasks enqueued during shutdown: no owner left, the stopping thread acts as owner.
+        drainMailbox();
+        if (thread.isAlive()) {
+            MinecraftServer.getExceptionManager().handleException(
+                    new IllegalStateException("Instance thread " + thread.getName() + " did not stop in time"));
+        }
+    }
+
+    /**
+     * Gets whether a live tick thread currently owns this instance.
+     *
+     * @return true if a tick thread is running
+     */
+    @ApiStatus.Internal
+    public boolean isTickThreadRunning() {
+        final InstanceThread thread = tickThread();
+        return thread != null && thread.isAlive();
+    }
+
+    /**
+     * Sets the CPU budget granted per tick slot, in milliseconds. Lower values
+     * degrade the local TPS under load instead of lagging other instances.
+     *
+     * @param msPerTick the budget, must be positive
+     */
+    public void setTickBudget(double msPerTick) {
+        Check.argCondition(msPerTick <= 0, "Tick budget must be positive");
+        this.tickBudgetMs = msPerTick;
+    }
+
+    /**
+     * Gets the CPU budget granted per tick slot, in milliseconds.
+     *
+     * @return the budget
+     */
+    public double getTickBudget() {
+        return tickBudgetMs;
+    }
+
+    /**
+     * Gets the number of gameplay ticks performed.
+     *
+     * @return the tick count
+     */
+    public long getTickCount() {
+        return tickCount.get();
+    }
+
+    /**
+     * Gets the number of ticks skipped by budget exhaustion.
+     *
+     * @return the skipped tick count
+     */
+    public long getSkippedTicks() {
+        return skippedTicks.get();
+    }
+
+    private InstanceContainer requireContainer() {
+        if (this instanceof InstanceContainer container) return container;
+        throw new IllegalStateException("Only InstanceContainer owns a tick thread, not " + getClass().getSimpleName());
+    }
+
+    private void drainMailbox() {
+        for (int i = 0; i < MAX_MAILBOX_DRAIN; i++) {
+            final Runnable task = mailbox().poll();
+            if (task == null) break;
+            try {
+                task.run();
+            } catch (Throwable t) {
+                MinecraftServer.getExceptionManager().handleException(t);
+            }
+        }
     }
 
     /**

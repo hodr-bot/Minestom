@@ -148,7 +148,7 @@ public class EntityCreature extends LivingEntity implements NavigableEntity, Ent
         attack(target, false);
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "deprecation"}) // cast + legacy no-op shim
     @ApiStatus.Experimental
     @Override
     public Acquirable<? extends EntityCreature> acquirable() {

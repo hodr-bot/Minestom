@@ -12,6 +12,7 @@ import net.minestom.server.event.server.ServerTickMonitorEvent;
 import net.minestom.server.exception.ExceptionManager;
 import net.minestom.server.instance.Chunk;
 import net.minestom.server.instance.Instance;
+import net.minestom.server.instance.InstanceContainer;
 import net.minestom.server.instance.InstanceManager;
 import net.minestom.server.instance.block.BlockManager;
 import net.minestom.server.listener.manager.PacketListenerManager;
@@ -36,7 +37,6 @@ import net.minestom.server.thread.ThreadProvider;
 import net.minestom.server.timer.SchedulerManager;
 import net.minestom.server.utils.PacketViewableUtils;
 import net.minestom.server.utils.collection.MappedCollection;
-import net.minestom.server.utils.time.Tick;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,12 +72,14 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
 
     private final Server server;
 
+    @SuppressWarnings("deprecation") // legacy dead dispatcher, kept for API compatibility
     private final ThreadDispatcher<Chunk, Entity> dispatcher;
     private final Ticker ticker;
 
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean stopped = new AtomicBoolean();
 
+    @SuppressWarnings("deprecation") // legacy dead dispatcher construction, kept for API compatibility
     public ServerProcessImpl(Auth auth) {
         this.auth = auth;
         this.exception = new ExceptionManager();
@@ -185,6 +187,7 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
     }
 
     @Override
+    @SuppressWarnings("deprecation") // legacy dead dispatcher, kept for API compatibility
     public ThreadDispatcher<Chunk, Entity> dispatcher() {
         return dispatcher;
     }
@@ -247,7 +250,7 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
         connection.shutdown();
         server.stop();
         LOGGER.info("Shutting down all thread pools.");
-        dispatcher.shutdown();
+        instance().stopTickThreads();
         LOGGER.info("{} server stopped successfully.", brand);
     }
 
@@ -271,6 +274,7 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
 
     private final class TickerImpl implements Ticker {
         @Override
+        @SuppressWarnings("deprecation") // legacy monitoring via no-op shim
         public void tick(long nanoTime) {
             var serverTickEvent = EventsJFR.newServerTick();
             serverTickEvent.begin();
@@ -302,22 +306,17 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
 
         private void serverTick(long nanoStart) {
             long milliStart = TimeUnit.NANOSECONDS.toMillis(nanoStart);
-            // Tick all instances
+            // Tick instances without a running tick thread directly (tests, tooling).
+            // In production each InstanceContainer ticks on its own thread.
             for (Instance instance : instance().getInstances()) {
-                try {
-                    instance.tick(milliStart);
-                } catch (Exception e) {
-                    exception().handleException(e);
+                if (instance instanceof InstanceContainer container && !container.isTickThreadRunning()) {
+                    try {
+                        container.tickOwned(milliStart);
+                    } catch (Exception e) {
+                        exception().handleException(e);
+                    }
                 }
             }
-            // Tick all chunks (and entities inside)
-            dispatcher().updateAndAwait(nanoStart);
-
-            // Clear removed entities & update threads
-            final long tickDuration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - nanoStart);
-            final long remainingTickDuration = Tick.SERVER_TICKS.getDuration().toNanos() - tickDuration;
-            // the nanoTimeout for refreshThreads is the remaining tick duration
-            dispatcher().refreshThreads(remainingTickDuration);
         }
     }
 }

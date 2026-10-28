@@ -1,6 +1,7 @@
 package net.minestom.server.instance;
 
 import net.minestom.server.MinecraftServer;
+import net.minestom.server.ServerProcess;
 import net.minestom.server.entity.Player;
 import net.minestom.server.event.EventDispatcher;
 import net.minestom.server.event.instance.InstanceRegisterEvent;
@@ -12,6 +13,7 @@ import net.minestom.server.world.DimensionType;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -142,6 +144,8 @@ public final class InstanceManager {
     public void unregisterInstance(Instance instance) {
         long onlinePlayers = instance.getPlayers().stream().filter(Player::isOnline).count();
         Check.stateCondition(onlinePlayers > 0, "You cannot unregister an instance with players inside.");
+        // Stop the tick thread first, outside the instance monitor (the tick takes it briefly).
+        instance.stopTickThread();
         synchronized (instance) {
             InstanceUnregisterEvent event = new InstanceUnregisterEvent(instance);
             EventDispatcher.call(event);
@@ -149,8 +153,6 @@ public final class InstanceManager {
             // Unload all chunks
             if (instance instanceof InstanceContainer) {
                 instance.getChunks().forEach(instance::unloadChunk);
-                var dispatcher = MinecraftServer.process().dispatcher();
-                instance.getChunks().forEach(dispatcher::deletePartition);
             }
             if (instance instanceof SharedInstance sharedInstance) {
                 sharedInstance.getInstanceContainer().removeSharedInstance(sharedInstance);
@@ -168,6 +170,29 @@ public final class InstanceManager {
      */
     public Set<Instance> getInstances() {
         return Collections.unmodifiableSet(instances);
+    }
+
+    /**
+     * Starts one tick thread per registered {@link InstanceContainer}, staggered
+     * across the tick slot so instances do not all start their tick at once.
+     */
+    public void startTickThreads() {
+        final List<InstanceContainer> containers = instances.stream()
+                .filter(InstanceContainer.class::isInstance)
+                .map(InstanceContainer.class::cast)
+                .toList();
+        final int count = containers.size();
+        for (int i = 0; i < count; i++) {
+            final long phase = count == 0 ? 0 : (long) i * MinecraftServer.TICK_MS * 1_000_000L / count;
+            containers.get(i).startTickThread(phase);
+        }
+    }
+
+    /**
+     * Stops every instance tick thread.
+     */
+    public void stopTickThreads() {
+        for (Instance instance : instances) instance.stopTickThread();
     }
 
     /**
@@ -194,8 +219,11 @@ public final class InstanceManager {
     private void UNSAFE_registerInstance(Instance instance) {
         instance.setRegistered(true);
         this.instances.add(instance);
-        var dispatcher = MinecraftServer.process().dispatcher();
-        instance.getChunks().forEach(dispatcher::createPartition);
+        final ServerProcess process = MinecraftServer.process();
+        if (process != null && process.isAlive() && instance instanceof InstanceContainer container) {
+            // Registered after server start: give it a tick thread immediately.
+            container.startTickThread(0);
+        }
         InstanceRegisterEvent event = new InstanceRegisterEvent(instance);
         EventDispatcher.call(event);
     }

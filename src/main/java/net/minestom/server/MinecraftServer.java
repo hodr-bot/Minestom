@@ -396,12 +396,12 @@ public final class MinecraftServer implements MinecraftConstants {
      * <p>
      * It should be called after {@link #init()} and probably your own initialization code.
      *
-     * @param address the server address
+     * @param socketAddress the server address to bind to
      * @throws IllegalStateException if called before {@link #init()} or if the server is already running
      */
-    public void start(SocketAddress address) {
-        serverProcess.start(address);
-        serverProcess.dispatcher().start();
+    public void start(SocketAddress socketAddress) {
+        serverProcess.start(socketAddress);
+        serverProcess.instance().startTickThreads();
         new TickSchedulerThread(serverProcess).start();
     }
 

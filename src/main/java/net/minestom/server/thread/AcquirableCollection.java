@@ -8,11 +8,11 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 @ApiStatus.Experimental
+@SuppressWarnings("deprecation") // legacy internals, kept for API compatibility
 public class AcquirableCollection<E> implements Collection<Acquirable<E>> {
     private final Collection<Acquirable<E>> acquirableCollection;
 
@@ -21,19 +21,9 @@ public class AcquirableCollection<E> implements Collection<Acquirable<E>> {
     }
 
     public void acquireSync(Consumer<E> consumer) {
-        final Map<TickThread, List<E>> threadEntitiesMap = retrieveOptionalThreadMap(acquirableCollection, consumer);
-        // Acquire all the threads one by one
-        for (Map.Entry<TickThread, List<E>> entry : threadEntitiesMap.entrySet()) {
-            final TickThread tickThread = entry.getKey();
-            ReentrantLock lock = AcquirableImpl.enter(tickThread);
-            try {
-                final List<E> values = entry.getValue();
-                for (E value : values) {
-                    consumer.accept(value);
-                }
-            } finally {
-                AcquirableImpl.leave(lock);
-            }
+        // Single owner thread per instance: no acquisition necessary.
+        for (Acquirable<E> acquirable : acquirableCollection) {
+            consumer.accept(acquirable.unwrap());
         }
     }
 

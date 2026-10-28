@@ -2573,7 +2573,7 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
         return Math.min(settings.viewDistance(), maxViewDistance) + 1;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "deprecation"}) // cast + legacy no-op shim
     @ApiStatus.Experimental
     @Override
     public Acquirable<? extends Player> acquirable() {
