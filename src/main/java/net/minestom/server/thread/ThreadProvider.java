@@ -6,7 +6,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 @FunctionalInterface
 @ApiStatus.Experimental
-@Deprecated(since = "instance-threads", forRemoval = false)
 public interface ThreadProvider<T> {
     static <T> ThreadProvider<T> counter() {
         return new ThreadProvider<>() {

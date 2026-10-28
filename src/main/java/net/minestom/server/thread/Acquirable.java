@@ -11,7 +11,6 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 
 @ApiStatus.Experimental
-@Deprecated(since = "instance-threads", forRemoval = false)
 public sealed interface Acquirable<T> permits AcquirableImpl {
 
     /**

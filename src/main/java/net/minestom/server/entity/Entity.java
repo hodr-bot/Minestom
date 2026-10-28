@@ -115,6 +115,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -236,7 +237,7 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
     // Tick related
     private long ticks;
 
-    @SuppressWarnings({"this-escape", "deprecation"}) // self registration deliberate; Acquirable is a legacy no-op shim
+    @SuppressWarnings("this-escape") // deliberate self registration, entities are not usable until spawned
     private final Acquirable<Entity> acquirable = Acquirable.unassigned(this);
 
     // Cross-instance transfer state. Only the newest ticket is honored; older
@@ -244,17 +245,12 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
     private final AtomicLong transferCounter = new AtomicLong();
     private volatile TransferState transferState = TransferState.SETTLED;
 
+    // Futures of in-flight transfers, keyed by ticket id. Kept off the ticket
+    // so a stale ticket can never complete the wrong transfer.
+    private final ConcurrentHashMap<Long, CompletableFuture<Void>> transferFutures = new ConcurrentHashMap<>();
+
     private enum TransferState {
         SETTLED, PENDING_LEAVE, LEAVING, IN_TRANSIT, JOINING
-    }
-
-    /**
-     * Whether the entity is currently owned by its instance tick (not between
-     * owners during a transfer). Instances skip unsettled entities.
-     */
-    @ApiStatus.Internal
-    public boolean isTransferSettled() {
-        return transferState == TransferState.SETTLED;
     }
 
     /**
@@ -951,6 +947,7 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
         // setInstance, so getInstance()/addViewer() behave between the call and
         // the join. The entity is skipped by ticks while between owners.
         final long ticketId = transferCounter.incrementAndGet();
+        final CompletableFuture<Void> future = newTransferFuture(ticketId);
         this.isActive = true;
         final Pos rollbackPos = this.position;
         final Pos spawn = clampPosition(spawnPosition);
@@ -964,14 +961,14 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
             this.leaveFrom = previousInstance;
             TransferTicket firstTicket = new TransferTicket(ticketId, instance, spawn, previousInstance, rollbackPos);
             previousInstance.execute(() -> leaveForTransfer(firstTicket));
-            return firstTicket.future();
+            return future;
         }
         if (transferState == TransferState.SETTLED) {
             // First spawn: nothing to leave, mark the transit directly.
             transferState = TransferState.IN_TRANSIT;
             TransferTicket ticket = new TransferTicket(ticketId, instance, spawn, null, rollbackPos);
             beginTransferLoad(ticket);
-            return ticket.future();
+            return future;
         }
         // Chained transfer while a previous one is in flight: the first leave
         // still owns the entity, reroute through it (stale tickets drop on arrival).
@@ -982,7 +979,37 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
         } else {
             beginTransferLoad(ticket);
         }
-        return ticket.future();
+        return future;
+    }
+
+    /**
+     * Whether the entity is currently owned by its instance tick (not between
+     * owners during a transfer). Instances skip unsettled entities.
+     */
+    @ApiStatus.Internal
+    public boolean isTransferSettled() {
+        return transferState == TransferState.SETTLED;
+    }
+
+    /**
+     * Registers the future of a new transfer ticket.
+     */
+    private CompletableFuture<Void> newTransferFuture(long ticketId) {
+        final CompletableFuture<Void> future = new CompletableFuture<>();
+        transferFutures.put(ticketId, future);
+        return future;
+    }
+
+    /**
+     * Completes a transfer ticket and forgets it. Stale tickets complete
+     * nothing: their future was already removed.
+     */
+    private void completeTransferFuture(TransferTicket ticket, @Nullable Throwable error) {
+        final CompletableFuture<Void> future = transferFutures.remove(ticket.id());
+        if (future == null) return;
+
+        if (error != null) future.completeExceptionally(error);
+        else future.complete(null);
     }
 
     /**
@@ -990,7 +1017,7 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
      */
     private void leaveForTransfer(TransferTicket ticket) {
         if (ticket.id() != transferCounter.get() || isRemoved()) {
-            ticket.future().completeExceptionally(new CancellationException("Superseded transfer"));
+            completeTransferFuture(ticket, new CancellationException("Superseded transfer"));
             return;
         }
         if (transferState != TransferState.PENDING_LEAVE) {
@@ -999,9 +1026,12 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
             beginTransferLoad(ticket);
             return;
         }
+
         transferState = TransferState.LEAVING;
+
         AddEntityToInstanceEvent event = new AddEntityToInstanceEvent(ticket.target(), this);
         EventDispatcher.call(event);
+
         if (event.isCancelled() || isRemoved()) {
             // Roll back the synchronous reassignment: the entity never left.
             final Pos rollback = ticket.rollbackPos();
@@ -1011,14 +1041,16 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
             this.instance = ticket.leaveFrom();
             transferState = TransferState.SETTLED;
             this.leaveFrom = null;
-            ticket.future().completeExceptionally(new CancellationException("Transfer cancelled"));
+            completeTransferFuture(ticket, new CancellationException("Transfer cancelled"));
             return;
         }
+
         final Instance owner = ticket.leaveFrom();
         if (owner != null) {
             removeFromInstance(owner);
             if (this.leaveFrom == owner) this.leaveFrom = null;
         }
+
         this.isActive = true;
         this.previousPhysicsResult = null;
         transferState = TransferState.IN_TRANSIT;
@@ -1045,7 +1077,7 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
         transferState = TransferState.SETTLED;
         final Throwable cause = error != null ? error
                 : new IllegalStateException("Entity has been placed in an unloaded chunk!");
-        ticket.future().completeExceptionally(cause);
+        completeTransferFuture(ticket, cause);
         MinecraftServer.getExceptionManager().handleException(cause);
     }
 
@@ -1054,33 +1086,39 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
      */
     private void joinAfterTransfer(TransferTicket ticket, Chunk chunk) {
         if (ticket.id() != transferCounter.get() || transferState != TransferState.IN_TRANSIT || isRemoved()) {
-            ticket.future().completeExceptionally(new CancellationException("Superseded transfer"));
+            completeTransferFuture(ticket, new CancellationException("Superseded transfer"));
             return;
         }
+
         final Instance target = ticket.target();
         transferState = TransferState.JOINING;
+
         try {
             this.instance = target;
+
             final Pos spawn = clampPosition(ticket.spawnPosition());
             setPositionInternal(spawn, spawn.yaw());
             this.previousPosition = spawn;
             this.lastSyncedPosition = spawn;
             refreshCurrentChunk(chunk);
+
             if (this instanceof Player player) {
                 target.bossBars().forEach(player::showBossBar);
                 player.sendPacket(target.createInitializeWorldBorderPacket());
                 player.sendPacket(target.createTimePacket());
                 player.sendPackets(target.getWeather().createWeatherPackets());
             }
+
             target.getEntityTracker().register(this, position, trackingTarget, trackingUpdate);
             spawn();
             EventsJFR.newInstanceJoin(getUuid(), target.getUuid()).commit();
             EventDispatcher.call(new EntitySpawnEvent(this, target));
+
             transferState = TransferState.SETTLED;
-            ticket.future().complete(null);
+            completeTransferFuture(ticket, null);
         } catch (Throwable t) {
             transferState = TransferState.SETTLED;
-            ticket.future().completeExceptionally(t);
+            completeTransferFuture(ticket, t);
             MinecraftServer.getExceptionManager().handleException(t);
         }
     }
@@ -1753,6 +1791,11 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
     protected void remove(boolean permanent) {
         if (isRemoved()) return;
         transferCounter.incrementAndGet(); // Cancel any in-flight transfer
+        // Fail every pending transfer: the entity is going away, nobody joins.
+        for (var pending : transferFutures.values()) {
+            pending.completeExceptionally(new CancellationException("Entity removed"));
+        }
+        transferFutures.clear();
         // Unregister from the tracker that actually holds the entity: the
         // pending leave owner while a transfer is dispatched, the instance
         // itself when settled, nothing once the leave ran (join drops via isRemoved).
@@ -2105,7 +2148,6 @@ public class Entity implements Viewable, Tickable, Schedulable, Snapshotable, Ev
     }
 
     @ApiStatus.Experimental
-    @SuppressWarnings("deprecation") // legacy no-op shim, kept for API compatibility
     @Override
     public Acquirable<? extends Entity> acquirable() {
         return acquirable;

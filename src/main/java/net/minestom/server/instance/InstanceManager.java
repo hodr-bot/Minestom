@@ -43,6 +43,8 @@ public final class InstanceManager {
     public void registerInstance(Instance instance) {
         Check.stateCondition(instance instanceof SharedInstance,
                 "Please use InstanceManager#registerSharedInstance to register a shared instance");
+        Check.stateCondition(instance instanceof ModelInstance,
+                "Model instances are templates and cannot be registered: register their views instead");
         UNSAFE_registerInstance(instance);
     }
 
@@ -180,6 +182,7 @@ public final class InstanceManager {
         final List<InstanceContainer> containers = instances.stream()
                 .filter(InstanceContainer.class::isInstance)
                 .map(InstanceContainer.class::cast)
+                .filter(container -> !(container instanceof ModelInstance))
                 .toList();
         final int count = containers.size();
         for (int i = 0; i < count; i++) {

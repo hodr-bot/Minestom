@@ -233,7 +233,7 @@ public class ItemEntity extends Entity {
     }
 
     @ApiStatus.Experimental
-    @SuppressWarnings({"unchecked", "deprecation"}) // cast + legacy no-op shim
+    @SuppressWarnings("unchecked")
     @Override
     public Acquirable<? extends ItemEntity> acquirable() {
         return (Acquirable<? extends ItemEntity>) super.acquirable();

@@ -18,7 +18,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * reachable is always local and owned, from any thread.
  */
 @EnvTest
-@SuppressWarnings("deprecation") // exercises the legacy threading shims
 public class AcquirableBasicIntegrationTest {
 
     @Test

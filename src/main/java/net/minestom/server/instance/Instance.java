@@ -152,9 +152,13 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
     private volatile @Nullable InstanceThread tickThread;
     // Cross-thread mailbox, drained by the owner at the start of every tick.
     private final MessagePassingQueue<Runnable> mailbox = ConcurrentMessageQueues.mpscUnboundedArrayQueue(64);
-    // CPU budget in milliseconds granted per tick slot; ticks are skipped while exhausted.
-    private volatile double tickBudgetMs = MinecraftServer.TICK_MS;
-    private double tickBudgetBalance;
+
+    /**
+     * Manual CPU budget override, in milliseconds per slot. Null means
+     * automatic: an even share of the tick across registered instances.
+     */
+    private volatile @Nullable Double manualBudgetMs;
+
     private final AtomicLong tickCount = new AtomicLong();
     private final AtomicLong skippedTicks = new AtomicLong();
     private final @Nullable EventNode<InstanceEvent> eventNode;
@@ -901,18 +905,17 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
     /**
      * Runs one owned tick slot: mailbox, scheduler, chunks, entities.
      * <p>
-     * Called either by the instance thread ({@link #tickSlot(long)}) with budget
-     * accounting, or directly when no tick thread is running (tests, tooling).
+     * Called directly when no tick thread is running (tests, tooling); in
+     * production the instance thread drives the slots with budget accounting.
      *
      * @param time the tick time in milliseconds, which may only be used as a delta and has no meaning in real life
      */
     @ApiStatus.Internal
     public void tickOwned(long time) {
         final InstanceThread owner = tickThread();
-        if (owner != null && owner.isAlive() && Thread.currentThread() != owner) {
-            throw new IllegalStateException("Instance " + uuid + " is owned by " + owner.getName()
-                    + ", tickOwned called from " + Thread.currentThread().getName());
-        }
+        Check.stateCondition(owner != null && owner.isAlive() && Thread.currentThread() != owner,
+                "Instance {0} is owned by {1}, tickOwned called from {2}",
+                uuid, owner, Thread.currentThread().getName());
         try {
             tick(time);
         } catch (Throwable t) {
@@ -920,6 +923,7 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
         }
         tickChunks(time);
         tickEntities(time);
+        noteTick();
     }
 
     /**
@@ -957,27 +961,6 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
     }
 
     /**
-     * Runs one budgeted tick slot on the instance thread: always drains the
-     * mailbox, then ticks the gameplay only if the CPU budget allows it.
-     * Skipped ticks degrade the local TPS instead of lagging other instances.
-     *
-     * @param time the tick time in milliseconds
-     */
-    @ApiStatus.Internal
-    public void tickSlot(long time) {
-        drainMailbox();
-        tickBudgetBalance = Math.min(tickBudgetBalance + tickBudgetMs, 2 * tickBudgetMs);
-        if (tickBudgetBalance < MinecraftServer.TICK_MS) {
-            skippedTicks.incrementAndGet();
-            return;
-        }
-        final long start = System.nanoTime();
-        tickOwned(time);
-        tickBudgetBalance -= (System.nanoTime() - start) / 1e6;
-        tickCount.incrementAndGet();
-    }
-
-    /**
      * Enqueues a task to run on the owner thread at the start of the next tick.
      * Thread-safe, may be called from any thread.
      * <p>
@@ -1001,11 +984,9 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
     @ApiStatus.Internal
     public void checkOwner() {
         final Thread owner = tickThread();
-        if (owner != null && owner.isAlive() && Thread.currentThread() != owner) {
-            throw new IllegalStateException("Cross-instance access: instance " + uuid
-                    + " is owned by " + owner.getName()
-                    + ", accessed from " + Thread.currentThread().getName());
-        }
+        Check.stateCondition(owner != null && owner.isAlive() && Thread.currentThread() != owner,
+                "Cross-instance access: instance {0} is owned by {1}, accessed from {2}",
+                uuid, owner, Thread.currentThread().getName());
     }
 
     /**
@@ -1081,23 +1062,76 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
     }
 
     /**
-     * Sets the CPU budget granted per tick slot, in milliseconds. Lower values
-     * degrade the local TPS under load instead of lagging other instances.
+     * Sets a manual CPU budget, in milliseconds per slot. Lower values degrade
+     * the local TPS under load instead of lagging other instances.
+     * <p>
+     * Overrides the automatic fair share until {@link #setTickBudgetAutomatic}
+     * is called.
      *
      * @param msPerTick the budget, must be positive
      */
     public void setTickBudget(double msPerTick) {
         Check.argCondition(msPerTick <= 0, "Tick budget must be positive");
-        this.tickBudgetMs = msPerTick;
+        this.manualBudgetMs = msPerTick;
     }
 
     /**
-     * Gets the CPU budget granted per tick slot, in milliseconds.
+     * Clears the manual budget: the instance goes back to an even share of
+     * the tick across registered instances.
+     */
+    public void setTickBudgetAutomatic() {
+        this.manualBudgetMs = null;
+    }
+
+    /**
+     * Whether the budget is currently automatic.
+     *
+     * @return true when no manual override is set
+     */
+    public boolean isTickBudgetAutomatic() {
+        return manualBudgetMs == null;
+    }
+
+    /**
+     * Gets the effective CPU budget per slot, in milliseconds: the manual
+     * override when set, otherwise an even share of the tick across the
+     * registered instances ({@code TICK_MS / instance count}).
      *
      * @return the budget
      */
     public double getTickBudget() {
-        return tickBudgetMs;
+        final Double manual = manualBudgetMs;
+        if (manual != null) return manual;
+
+        final InstanceManager manager = MinecraftServer.getInstanceManager();
+        final int count = manager != null ? Math.max(1, manager.getInstances().size()) : 1;
+        return (double) MinecraftServer.TICK_MS / count;
+    }
+
+    /**
+     * Gets the effective CPU budget per slot, in nanoseconds.
+     *
+     * @return the budget
+     */
+    @ApiStatus.Internal
+    public long currentBudgetNanos() {
+        return (long) (getTickBudget() * 1_000_000L);
+    }
+
+    /**
+     * Records a gameplay tick performed by the owner thread.
+     */
+    @ApiStatus.Internal
+    public void noteTick() {
+        tickCount.incrementAndGet();
+    }
+
+    /**
+     * Records a tick skipped by budget exhaustion.
+     */
+    @ApiStatus.Internal
+    public void noteSkippedTick() {
+        skippedTicks.incrementAndGet();
     }
 
     /**
@@ -1119,14 +1153,16 @@ public abstract class Instance implements Block.Getter, Block.Setter, Biome.Gett
     }
 
     private InstanceContainer requireContainer() {
-        if (this instanceof InstanceContainer container) return container;
-        throw new IllegalStateException("Only InstanceContainer owns a tick thread, not " + getClass().getSimpleName());
+        Check.stateCondition(!(this instanceof InstanceContainer),
+                "Only InstanceContainer owns a tick thread, not " + getClass().getSimpleName());
+        return (InstanceContainer) this;
     }
 
-    private void drainMailbox() {
+    void drainMailbox() {
         for (int i = 0; i < MAX_MAILBOX_DRAIN; i++) {
             final Runnable task = mailbox().poll();
             if (task == null) break;
+
             try {
                 task.run();
             } catch (Throwable t) {

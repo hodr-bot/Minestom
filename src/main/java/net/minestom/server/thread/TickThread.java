@@ -22,7 +22,6 @@ import java.util.concurrent.locks.ReentrantLock;
  * No longer used: each instance ticks on its own {@link net.minestom.server.instance.InstanceThread}.
  */
 @ApiStatus.Internal
-@Deprecated(since = "instance-threads", forRemoval = false)
 public class TickThread extends MinestomThread {
     private final ReentrantLock lock = new ReentrantLock();
     private volatile boolean stop;

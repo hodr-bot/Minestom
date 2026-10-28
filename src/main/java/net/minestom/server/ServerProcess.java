@@ -113,10 +113,7 @@ public interface ServerProcess extends Registries, Snapshotable {
 
     /**
      * Dispatcher for tickable game objects.
-     *
-     * @deprecated No longer used: each instance ticks on its own thread.
      */
-    @Deprecated(since = "instance-threads", forRemoval = false)
     ThreadDispatcher<Chunk, Entity> dispatcher();
 
     /**

@@ -194,7 +194,7 @@ public class EntityProjectile extends Entity {
     }
 
     @ApiStatus.Experimental
-    @SuppressWarnings({"unchecked", "deprecation"}) // cast + legacy no-op shim
+    @SuppressWarnings("unchecked")
     @Override
     public Acquirable<? extends EntityProjectile> acquirable() {
         return (Acquirable<? extends EntityProjectile>) super.acquirable();

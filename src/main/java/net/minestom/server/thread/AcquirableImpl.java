@@ -15,7 +15,6 @@ import java.util.stream.Stream;
  * gameplay access is confined to it, so acquisition never blocks.
  */
 @ApiStatus.Internal
-@SuppressWarnings("deprecation") // legacy internals, kept for API compatibility
 public final class AcquirableImpl<T> implements Acquirable<T> {
     static final AtomicLong WAIT_COUNTER_NANO = new AtomicLong();
 

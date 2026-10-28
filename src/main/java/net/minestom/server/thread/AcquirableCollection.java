@@ -12,7 +12,6 @@ import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 @ApiStatus.Experimental
-@SuppressWarnings("deprecation") // legacy internals, kept for API compatibility
 public class AcquirableCollection<E> implements Collection<Acquirable<E>> {
     private final Collection<Acquirable<E>> acquirableCollection;
 

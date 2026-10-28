@@ -72,14 +72,12 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
 
     private final Server server;
 
-    @SuppressWarnings("deprecation") // legacy dead dispatcher, kept for API compatibility
     private final ThreadDispatcher<Chunk, Entity> dispatcher;
     private final Ticker ticker;
 
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean stopped = new AtomicBoolean();
 
-    @SuppressWarnings("deprecation") // legacy dead dispatcher construction, kept for API compatibility
     public ServerProcessImpl(Auth auth) {
         this.auth = auth;
         this.exception = new ExceptionManager();
@@ -187,7 +185,6 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
     }
 
     @Override
-    @SuppressWarnings("deprecation") // legacy dead dispatcher, kept for API compatibility
     public ThreadDispatcher<Chunk, Entity> dispatcher() {
         return dispatcher;
     }
@@ -274,7 +271,6 @@ final class ServerProcessImpl implements ServerProcess, Registries.Delegating {
 
     private final class TickerImpl implements Ticker {
         @Override
-        @SuppressWarnings("deprecation") // legacy monitoring via no-op shim
         public void tick(long nanoTime) {
             var serverTickEvent = EventsJFR.newServerTick();
             serverTickEvent.begin();

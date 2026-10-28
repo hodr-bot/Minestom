@@ -9,7 +9,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-@SuppressWarnings("deprecation") // exercises the legacy threading shims
 public class AcquirableTest {
 
     @Test

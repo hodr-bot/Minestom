@@ -751,7 +751,7 @@ public class LivingEntity extends Entity implements EquipmentHandler {
         super.takeKnockback(strength, x, z);
     }
 
-    @SuppressWarnings({"unchecked", "deprecation"}) // cast + legacy no-op shim
+    @SuppressWarnings("unchecked")
     @ApiStatus.Experimental
     @Override
     public Acquirable<? extends LivingEntity> acquirable() {

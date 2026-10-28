@@ -11,7 +11,6 @@ import java.util.concurrent.CountDownLatch;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @EnvTest
-@SuppressWarnings("deprecation") // exercises the legacy threading shims
 public class AcquirableEntityIntegrationTest {
 
     @Test

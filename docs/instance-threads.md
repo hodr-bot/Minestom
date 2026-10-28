@@ -64,11 +64,13 @@ Drained at tick start, before chunks/entities.
 ## Instance loop (per instance thread)
 
 Phase-offset start (`index * TICK_MS / N`, recomputed on register/unregister)
-to smooth bursts. Token bucket for local TPS:
+to smooth bursts. The thread owns the CPU budget (token bucket for local TPS):
 
-- each slot: `budget = min(budget + X, 2*X)`; skip the gameplay tick while
-  `budget < 0`, else tick and `budget -= elapsed`.
-- `X` is per-instance (`setTickBudget`, default = full rate).
+- each slot: `budget = min(budget + grant, 2*grant)`; skip the gameplay tick
+  while `budget < TICK_MS`, else tick and `budget -= elapsed`.
+- `grant` is the effective budget: the manual override (`setTickBudget`) when
+  set, otherwise an even share of the tick across registered instances
+  (`TICK_MS / instance count`, back to auto with `setTickBudgetAutomatic`).
 - skipped ticks skip everything gameplay (packets included); the queue is
   bounded and kicks on overflow, keepalive stays global so no false timeouts.
 - never catch up: behind by more than K slots means dropping, same spirit as
@@ -93,8 +95,21 @@ conductor until `setInstance` hands them to an instance thread).
 
 ## API compatibility
 
-Public signatures unchanged. `Acquirable` becomes a no-op (always local on
-the owner thread) marked deprecated. `ThreadDispatcher`/`ThreadProvider`/
-`TickThread` internals removed; `ServerProcess.dispatcher()` kept as a
-deprecated facade. Additions only: `execute`, `setTickBudget`, transfer
-tickets (internal).
+Public signatures unchanged. `Acquirable` is a no-op (always local on the
+owner thread); `ThreadDispatcher`/`ThreadProvider`/`TickThread` internals are
+dead but kept. Additions only: `execute`, `setTickBudget` /
+`setTickBudgetAutomatic` / `isTickBudgetAutomatic`, transfer tickets
+(internal records), `ModelInstance` + `ReadOnlyInstance`.
+
+## Read-only model views (zero chunk duplication)
+
+`ModelInstance` is a template: it holds chunks but is never registered and
+never ticks (registration and thread start are refused loudly). `createView()`
+returns a `ReadOnlyInstance` sharing the model chunks by reference.
+
+- chunk reads (`getChunk`, loads, generation) go to the model; every write
+  path (`setBlock`, `placeBlock`, `breakBlock`, `unloadChunk`, loader /
+  supplier / generator setters) is rejected.
+- entities are fully separated: each view has its own tracker and ticks its
+  entities on its own thread; views never tick chunks (the model owns them).
+- saves are no-ops (views own nothing); `getSrcInstance()` points at the model.
